@@ -18,7 +18,7 @@ impl Bitmap {
             size: data.len() * 8,
         }
     }
-    
+
     /// Create a new empty bitmap
     pub fn new(size: usize) -> Self {
         let byte_count = (size + 7) / 8;
@@ -27,42 +27,42 @@ impl Bitmap {
             size,
         }
     }
-    
+
     /// Check if a bit is set
     pub fn is_set(&self, bit: usize) -> bool {
         if bit >= self.size {
             return false;
         }
-        
+
         let byte_index = bit / 8;
         let bit_index = bit % 8;
         (self.data[byte_index] & (1 << bit_index)) != 0
     }
-    
+
     /// Set a bit
     pub fn set(&mut self, bit: usize) -> Ext4Result<()> {
         if bit >= self.size {
             return Err(Ext4Error::InvalidInput);
         }
-        
+
         let byte_index = bit / 8;
         let bit_index = bit % 8;
         self.data[byte_index] |= 1 << bit_index;
         Ok(())
     }
-    
+
     /// Clear a bit
     pub fn clear(&mut self, bit: usize) -> Ext4Result<()> {
         if bit >= self.size {
             return Err(Ext4Error::InvalidInput);
         }
-        
+
         let byte_index = bit / 8;
         let bit_index = bit % 8;
         self.data[byte_index] &= !(1 << bit_index);
         Ok(())
     }
-    
+
     /// Find the first free bit
     pub fn find_first_free(&self) -> Option<usize> {
         for (byte_index, &byte) in self.data.iter().enumerate() {
@@ -77,7 +77,7 @@ impl Bitmap {
         }
         None
     }
-    
+
     /// Find the first set bit
     pub fn find_first_set(&self) -> Option<usize> {
         for (byte_index, &byte) in self.data.iter().enumerate() {
@@ -92,7 +92,7 @@ impl Bitmap {
         }
         None
     }
-    
+
     /// Count the number of free bits
     pub fn count_free(&self) -> usize {
         let mut count = 0;
@@ -107,17 +107,17 @@ impl Bitmap {
         }
         count
     }
-    
+
     /// Count the number of set bits
     pub fn count_set(&self) -> usize {
         self.size - self.count_free()
     }
-    
+
     /// Get the bitmap data as bytes
     pub fn as_bytes(&self) -> &[u8] {
         &self.data
     }
-    
+
     /// Get the bitmap size in bits
     pub fn size(&self) -> usize {
         self.size
