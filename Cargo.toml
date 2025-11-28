@@ -1,0 +1,21 @@
+[package]
+name = "ext4rs"
+version = "0.1.0"
+edition = "2021"
+description = "A pure Rust ext4 filesystem implementation"
+license = "MIT OR Apache-2.0"
+authors = ["ArceOS Team"]
+
+[dependencies]
+log = "0.4"
+bitflags = "2.0"
+byteorder = { version = "1.4", default-features = false }
+crc = "3.0"
+axerrno = "0.1"
+axio = { version = "0.1", features = ["alloc"] }
+axdriver = { workspace = true, features = ["block"] }
+axdriver_block = {git = "https://github.com/arceos-org/axdriver_crates.git", tag = "v0.1.2"}
+
+[features]
+default = []
+alloc = []
