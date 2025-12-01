@@ -93,7 +93,7 @@ impl File {
         let mut offset = self.position;
 
         while bytes_read < buf.len() && offset < self.inode.size {
-            let block_num = self.inode.get_block_number(offset, block_size)?;
+            let block_num = self.inode.get_block_number(offset, block_size, fs)?;
             if block_num == 0 {
                 // Sparse file - zero block
                 let block_offset = (offset % block_size as u64) as usize;
@@ -135,23 +135,36 @@ impl File {
         let block_size = fs.superblock().block_size();
         let mut bytes_written = 0;
         let mut offset = self.position;
+        let mut inode = self.inode.clone();
 
         while bytes_written < buf.len() {
-            let block_num = self.inode.get_block_number(offset, block_size)?;
-            if block_num == 0 {
-                // Need to allocate a new block
-                let new_block = fs.alloc_block()?;
-                // TODO: Update inode block pointer
-                // This is a simplified implementation
-                return Err(Ext4Error::NotSupported);
-            }
+            let block_index = offset / block_size as u64;
+            let block_num = match inode.get_block_number(offset, block_size, fs) {
+                Ok(0) => {
+                    // Need to allocate a new block
+                    let new_block = fs.alloc_block()?;
+                    inode.set_block(block_index, new_block, block_size, fs)?;
+                    new_block
+                }
+                Ok(block) => block,
+                Err(_) => {
+                    // Need to allocate a new block
+                    let new_block = fs.alloc_block()?;
+                    inode.set_block(block_index, new_block, block_size, fs)?;
+                    new_block
+                }
+            };
 
             let block_offset = (offset % block_size as u64) as usize;
             let remaining_in_block =
                 (block_size as usize - block_offset).min(buf.len() - bytes_written);
 
             let mut block_buf = vec![0u8; block_size as usize];
-            fs.read_block(block_num, &mut block_buf)?;
+
+            // Read existing block if not writing to a new block
+            if block_offset > 0 || remaining_in_block < block_size as usize {
+                fs.read_block(block_num, &mut block_buf)?;
+            }
 
             block_buf[block_offset..block_offset + remaining_in_block]
                 .copy_from_slice(&buf[bytes_written..bytes_written + remaining_in_block]);
@@ -165,10 +178,15 @@ impl File {
         self.position = offset;
 
         // Update file size if needed
-        if offset > self.inode.size {
-            // TODO: Update inode size
-            // This is a simplified implementation
+        if offset > inode.size {
+            inode.size = offset;
+            // Update block count
+            inode.blocks = (offset + block_size as u64 - 1) / block_size as u64;
         }
+
+        // Write updated inode
+        fs.write_inode(&inode)?;
+        self.inode = inode;
 
         Ok(bytes_written)
     }
@@ -182,14 +200,44 @@ impl File {
     where
         D: BlockDriverOps,
     {
+        let block_size = fs.superblock().block_size();
+        let old_block_count = (self.inode.size + block_size as u64 - 1) / block_size as u64;
+        let new_block_count = (new_size + block_size as u64 - 1) / block_size as u64;
+
         if new_size > self.inode.size {
-            // Expand file
-            // TODO: Allocate blocks as needed
-            return Err(Ext4Error::NotSupported);
+            // Expand file - allocate blocks as needed
+            for block_index in old_block_count..new_block_count {
+                let new_block = fs.alloc_block()?;
+                self.inode
+                    .set_block(block_index, new_block, block_size, fs)?;
+
+                // Initialize the new block with zeros
+                let zero_buf = vec![0u8; block_size as usize];
+                fs.write_block(new_block, &zero_buf)?;
+            }
         } else if new_size < self.inode.size {
-            // Shrink file
-            // TODO: Free blocks that are no longer needed
-            return Err(Ext4Error::NotSupported);
+            // Shrink file - free blocks that are no longer needed
+            for block_index in new_block_count..old_block_count {
+                if let Ok(block_num) =
+                    self.inode
+                        .get_block_number(block_index * block_size as u64, block_size, fs)
+                {
+                    if block_num != 0 {
+                        // Free the block
+                        // Note: In a complete implementation, we would need to update the block bitmap
+                        // For now, we just set the block pointer to 0
+                        self.inode.set_block(block_index, 0, block_size, fs)?;
+                    }
+                }
+            }
+        }
+
+        // Update the inode size
+        self.inode.size = new_size;
+
+        // Adjust position if it's beyond the new file size
+        if self.position > new_size {
+            self.position = new_size;
         }
 
         Ok(())

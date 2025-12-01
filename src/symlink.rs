@@ -53,9 +53,9 @@ impl SymLink {
             let mut target_bytes = Vec::new();
 
             for i in 0..self.inode.block_count(block_size) {
-                let block_num = self
-                    .inode
-                    .get_block_number(i * block_size as u64, block_size)?;
+                let block_num =
+                    self.inode
+                        .get_block_number(i * block_size as u64, block_size, fs)?;
                 if block_num == 0 {
                     break;
                 }

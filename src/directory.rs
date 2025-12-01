@@ -42,7 +42,13 @@ impl DirectoryEntry {
         let ino = read_u32(0);
         let rec_len = read_u16(4);
         let name_len = read_u8(6);
-        let file_type = read_u8(7);
+
+        // In ext4, file_type might not be present if it's an old filesystem
+        let file_type = if data.len() > 7 {
+            read_u8(7)
+        } else {
+            0 // Unknown type, will be determined from inode if needed
+        };
 
         if data.len() < 8 + name_len as usize {
             return Err(Ext4Error::InvalidInput);
@@ -109,9 +115,25 @@ impl<'a> Iterator for DirectoryIterator<'a> {
         }
 
         // Helper function to read little-endian values
+        let read_u32 = |offset: usize| -> u32 {
+            (entry_data[offset] as u32)
+                | ((entry_data[offset + 1] as u32) << 8)
+                | ((entry_data[offset + 2] as u32) << 16)
+                | ((entry_data[offset + 3] as u32) << 24)
+        };
+
         let read_u16 = |offset: usize| -> u16 {
             (entry_data[offset] as u16) | ((entry_data[offset + 1] as u16) << 8)
         };
+
+        // Read the inode number
+        let ino = read_u32(0);
+
+        // If inode is 0, this is an unused entry, skip it
+        if ino == 0 {
+            self.offset += 8; // Skip minimum entry size
+            return self.next();
+        }
 
         // Read the record length
         let rec_len = read_u16(4);
@@ -155,7 +177,9 @@ impl Directory {
         for entry_result in iter {
             match entry_result {
                 Ok(entry) => {
-                    if entry.ino != 0 {
+                    // Skip entries with inode 0 (deleted entries)
+                    if entry.ino != 0 && !entry.name.is_empty() {
+                        debug!("Found directory entry: {} (ino: {})", entry.name, entry.ino);
                         entries.push(entry);
                     }
                 }
@@ -166,6 +190,7 @@ impl Directory {
             }
         }
 
+        debug!("Parsed {} directory entries", entries.len());
         Ok(Self { entries })
     }
 

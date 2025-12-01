@@ -327,6 +327,11 @@ impl SuperBlock {
             block_size
         };
 
+        debug!(
+            "Superblock: magic={:#x}, block_size={}, first_data_block={}, inodes_per_group={}",
+            magic, block_size, first_data_block, inodes_per_group
+        );
+
         Ok(Self {
             inodes_count,
             blocks_count,

@@ -49,9 +49,23 @@ impl BlockGroupDescriptor {
         let read_u16 =
             |offset: usize| -> u16 { (data[offset] as u16) | ((data[offset + 1] as u16) << 8) };
 
+        // Debug raw data
+        debug!(
+            "Raw block group descriptor data (first 32 bytes): {:x?}",
+            &data[..32.min(data.len())]
+        );
+
         let block_bitmap = read_u32(0);
         let inode_bitmap = read_u32(4);
         let inode_table = read_u32(8);
+
+        debug!(
+            "Block group descriptor: block_bitmap={}, inode_bitmap={}, inode_table={}",
+            block_bitmap, inode_bitmap, inode_table
+        );
+        if data.len() >= 16 {
+            debug!("First 16 bytes: {:x?}", &data[..16]);
+        }
         let free_blocks_count = read_u16(12);
         let free_inodes_count = read_u16(14);
         let used_dirs_count = read_u16(16);
