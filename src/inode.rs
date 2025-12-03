@@ -377,6 +377,8 @@ impl Inode {
         let block_index = offset / block_size as u64;
 
         // Check if filesystem uses extents
+        debug!("inode {}: feature_incompat=0x{:x}, block[0]=0x{:x}", 
+               self.ino, fs.superblock.feature_incompat(), self.block[0]);
         if fs.superblock.feature_incompat() & 0x0040 != 0 {
             // EXT4_FEATURE_INCOMPAT_EXTENTS - use extent tree
             crate::extent::find_block_in_extent_tree(fs, &self.block, block_index as u32)

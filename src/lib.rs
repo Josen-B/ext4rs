@@ -653,9 +653,27 @@ impl<D: axdriver_block::BlockDriverOps> Ext4FileSystem<D> {
         block_buf[..dir_data.len()].copy_from_slice(&dir_data);
         self.write_block(block_num, &block_buf)?;
 
-        // Update inode
+        // Update inode with proper extent structure
         let mut updated_inode = new_inode;
-        updated_inode.block[0] = block_num;
+        
+        // Check if filesystem uses extents
+        debug!("feature_incompat = 0x{:x}", self.superblock.feature_incompat());
+        if self.superblock.feature_incompat() & 0x0040 != 0 {
+            // EXT4_FEATURE_INCOMPAT_EXTENTS - use extent format
+            // Create an inline extent in the inode block array
+            // Format: [magic|entries|depth, block0, len0|start_hi0, start_lo0, ...]
+            updated_inode.block[0] = 0xF30A | ((1 as u32) << 16); // magic=0xF30A, entries=1, depth=0
+            updated_inode.block[1] = 0; // logical block 0
+            updated_inode.block[2] = (1 as u32) | ((block_num >> 16) & 0xFFFF) as u32; // len=1, start_hi=block_num>>16
+            updated_inode.block[3] = (block_num & 0xFFFF) as u32; // start_lo=block_num&0xFFFF
+            debug!("Created directory inode {} with extent format: block[0]=0x{:x}, block[1]=0x{:x}, block[2]=0x{:x}, block[3]=0x{:x}", 
+                   new_ino, updated_inode.block[0], updated_inode.block[1], updated_inode.block[2], updated_inode.block[3]);
+        } else {
+            // Traditional block mapping
+            updated_inode.block[0] = block_num;
+            debug!("Created directory inode {} with traditional format: block[0]=0x{:x}", new_ino, block_num);
+        }
+        
         updated_inode.size = dir_data.len() as u64;
         updated_inode.blocks = 1;
 

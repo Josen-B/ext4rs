@@ -178,26 +178,20 @@ where
                     let start_lo = inode_block[(idx + 2) as usize];
                     let start = ((start_hi as u32) << 16) | start_lo;
                     
-                    // Debug: Check if this is a valid extent
-                    if block == 0 && len == 0 && start == 0 {
-                        debug!("Skipping empty extent at index {}", i);
-                        continue;
-                    }
-                    
                     debug!("Extent[{}]: block={}, len={}, start={}", i, block, len, start);
                     
-                    // Special case: if len is 0, it might mean extent is uninitialized
-                    // but inode size is 4096, so it should have at least one block
+                    // Check if this is a valid extent
                     if len == 0 {
-                        // This might be a special case where extent is not properly initialized
-                        // Let's try to use block number directly as start block
-                        debug!("Using fallback: treating block {} as start block", block);
+                        // If len is 0, this might be an uninitialized extent
+                        // For existing directories, this might mean the extent is not properly formatted
+                        // Let's try to use the block number directly
                         if logical_block == 0 {
                             return Ok(block);
                         }
+                        continue;
                     }
                     
-                    if logical_block >= block && len > 0 && logical_block < block + len as u32 {
+                    if logical_block >= block && logical_block < block + len as u32 {
                         return Ok(start + (logical_block - block));
                     }
                 }
