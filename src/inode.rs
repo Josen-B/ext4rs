@@ -169,20 +169,21 @@ impl Inode {
         }
 
         // Debug: Print first few block pointers with raw bytes
-        if ino == 2 {
-            debug!("Inode 2 raw bytes at offsets 40-60: {:x?}", &data[40..60]);
+        if ino == 2 || ino == 21 {
+            debug!("Inode {} raw bytes at offsets 40-60: {:x?}", ino, &data[40..60]);
             for i in 0..4 {
                 let offset = 40 + i * 4;
                 let raw_bytes = &data[offset..offset + 4];
-                let parsed = read_u32(offset);
+                let parsed_le = read_u32(offset);
+                let parsed_be = u32::from_be_bytes([raw_bytes[0], raw_bytes[1], raw_bytes[2], raw_bytes[3]]);
                 debug!(
-                    "Block[{}]: offset={}, bytes={:x?}, parsed={}",
-                    i, offset, raw_bytes, parsed
+                    "Block[{}]: offset={}, bytes={:x?}, parsed_le={}, parsed_be={}",
+                    i, offset, raw_bytes, parsed_le, parsed_be
                 );
             }
             debug!(
-                "Inode 2 block pointers: [{}, {}, {}, {}]",
-                block[0], block[1], block[2], block[3]
+                "Inode {} block pointers: [{}, {}, {}, {}]",
+                ino, block[0], block[1], block[2], block[3]
             );
         }
 
@@ -228,8 +229,54 @@ impl Inode {
         }
 
         // Combine high and low parts for 64-bit values
+        // Check for potential corruption in size_high
+        let size_high = if size_high > 0xFFFF {
+            warn!("Potential corruption in size_high for inode {}: {}, treating as 0", ino, size_high);
+            0
+        } else {
+            size_high
+        };
+        
         let size = ((size_high as u64) << 32) | (size_lo as u64);
         let blocks = blocks_lo as u64; // blocks is actually 32-bit in ext4
+        
+        // Sanity check for size
+        if size > 0x100000000 { // 4GB limit for sanity
+            warn!("Potential corruption in size for inode {}: {}, treating as 0", ino, size);
+            // For now, we'll use size_lo only
+            return Ok(Self {
+                ino,
+                mode: InodeMode::from_bits_truncate(mode),
+                uid,
+                size: size_lo as u64,
+                atime,
+                ctime,
+                mtime,
+                dtime,
+                gid,
+                links_count,
+                blocks,
+                flags,
+                version,
+                file_acl,
+                dir_acl,
+                faddr,
+                block,
+                generation,
+                faddr_ext,
+                file_acl_high,
+                size_high: 0,
+                obso_faddr,
+                extra_isize,
+                checksum,
+                ctime_extra,
+                mtime_extra,
+                atime_extra,
+                crtime,
+                crtime_extra,
+                projid,
+            });
+        }
 
         Ok(Self {
             ino,

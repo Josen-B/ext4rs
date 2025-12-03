@@ -531,6 +531,12 @@ impl<D: axdriver_block::BlockDriverOps> Ext4FileSystem<D> {
         let block_size = self.superblock.block_size();
         let mut dir_data = Vec::new();
 
+        // Special case for empty directories
+        if inode.size == 0 || inode.blocks == 0 {
+            debug!("Directory {} is empty", ino);
+            return Ok(vec![]);
+        }
+
         for i in 0..inode.block_count(block_size) {
             let block_num = inode.get_block_number(i * block_size as u64, block_size, self)?;
             debug!("Directory block {}: block_num={}", i, block_num);
