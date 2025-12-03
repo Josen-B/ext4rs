@@ -109,12 +109,39 @@ impl File {
                 continue;
             }
 
+            // Check if block number is valid
+            if block_num >= fs.superblock().blocks_count() as u32 {
+                warn!("Invalid block number {} in file inode {}, treating as zero", block_num, self.inode.ino);
+                // Treat as sparse block
+                let block_offset = (offset % block_size as u64) as usize;
+                let remaining_in_block =
+                    (block_size as usize - block_offset).min(buf.len() - bytes_read);
+
+                for i in 0..remaining_in_block {
+                    buf[bytes_read + i] = 0;
+                }
+
+                bytes_read += remaining_in_block;
+                offset += remaining_in_block as u64;
+                continue;
+            }
+
             let block_offset = (offset % block_size as u64) as usize;
             let remaining_in_block =
                 (block_size as usize - block_offset).min(buf.len() - bytes_read);
 
             let mut block_buf = vec![0u8; block_size as usize];
-            fs.read_block(block_num, &mut block_buf)?;
+            if let Err(e) = fs.read_block(block_num, &mut block_buf) {
+                warn!("Failed to read block {} for file inode {}: {:?}", block_num, self.inode.ino, e);
+                // Treat as sparse block
+                for i in 0..remaining_in_block {
+                    buf[bytes_read + i] = 0;
+                }
+
+                bytes_read += remaining_in_block;
+                offset += remaining_in_block as u64;
+                continue;
+            }
 
             buf[bytes_read..bytes_read + remaining_in_block]
                 .copy_from_slice(&block_buf[block_offset..block_offset + remaining_in_block]);
@@ -146,7 +173,17 @@ impl File {
                     inode.set_block(block_index, new_block, block_size, fs)?;
                     new_block
                 }
-                Ok(block) => block,
+                Ok(block) => {
+                    if block >= fs.superblock().blocks_count() as u32 {
+                        warn!("Invalid block number {} in file inode {}, allocating new block", block, inode.ino);
+                        // Allocate a new block
+                        let new_block = fs.alloc_block()?;
+                        inode.set_block(block_index, new_block, block_size, fs)?;
+                        new_block
+                    } else {
+                        block
+                    }
+                }
                 Err(_) => {
                     // Need to allocate a new block
                     let new_block = fs.alloc_block()?;
@@ -163,7 +200,10 @@ impl File {
 
             // Read existing block if not writing to a new block
             if block_offset > 0 || remaining_in_block < block_size as usize {
-                fs.read_block(block_num, &mut block_buf)?;
+                if let Err(e) = fs.read_block(block_num, &mut block_buf) {
+                    warn!("Failed to read block {} for file inode {}: {:?}", block_num, inode.ino, e);
+                    // Continue with zero-filled block
+                }
             }
 
             block_buf[block_offset..block_offset + remaining_in_block]

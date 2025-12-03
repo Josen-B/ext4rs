@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use log::*;
 
 use crate::{Ext4Error, Ext4Result};
@@ -138,5 +139,51 @@ impl BlockGroupDescriptor {
     }
     pub fn checksum(&self) -> u16 {
         self.checksum
+    }
+
+    /// Setters for updating fields
+    pub fn set_free_inodes_count(&mut self, count: u16) {
+        self.free_inodes_count = count;
+    }
+
+    pub fn set_free_blocks_count(&mut self, count: u16) {
+        self.free_blocks_count = count;
+    }
+
+    pub fn set_used_dirs_count(&mut self, count: u16) {
+        self.used_dirs_count = count;
+    }
+
+    /// Convert block group descriptor back to bytes for writing to disk
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut data = vec![0u8; 64]; // Use maximum size for descriptor
+        
+        // Helper function to write little-endian values
+        let write_u32 = |data: &mut [u8], offset: usize, value: u32| {
+            data[offset] = (value & 0xFF) as u8;
+            data[offset + 1] = ((value >> 8) & 0xFF) as u8;
+            data[offset + 2] = ((value >> 16) & 0xFF) as u8;
+            data[offset + 3] = ((value >> 24) & 0xFF) as u8;
+        };
+
+        let write_u16 = |data: &mut [u8], offset: usize, value: u16| {
+            data[offset] = (value & 0xFF) as u8;
+            data[offset + 1] = ((value >> 8) & 0xFF) as u8;
+        };
+
+        write_u32(&mut data, 0, self.block_bitmap);
+        write_u32(&mut data, 4, self.inode_bitmap);
+        write_u32(&mut data, 8, self.inode_table);
+        write_u16(&mut data, 12, self.free_blocks_count);
+        write_u16(&mut data, 14, self.free_inodes_count);
+        write_u16(&mut data, 16, self.used_dirs_count);
+        write_u16(&mut data, 18, self.flags);
+        write_u32(&mut data, 20, self.exclude_bitmap);
+        write_u16(&mut data, 24, self.block_bitmap_csum);
+        write_u16(&mut data, 26, self.inode_bitmap_csum);
+        write_u16(&mut data, 28, self.itable_unused);
+        write_u16(&mut data, 30, self.checksum);
+
+        data
     }
 }

@@ -103,6 +103,7 @@ impl<'a> Iterator for DirectoryIterator<'a> {
     type Item = Ext4Result<DirectoryEntry>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        // If we've reached end of data block, stop
         if self.offset >= self.data.len() {
             return None;
         }
@@ -129,14 +130,28 @@ impl<'a> Iterator for DirectoryIterator<'a> {
         // Read the inode number
         let ino = read_u32(0);
 
-        // If inode is 0, this is an unused entry, skip it
-        if ino == 0 {
-            self.offset += 8; // Skip minimum entry size
-            return self.next();
-        }
-
         // Read the record length
         let rec_len = read_u16(4);
+
+        // Debug output for first few entries
+        if self.offset < 64 {
+            debug!(
+                "Directory entry at offset {}: ino={}, rec_len={}, first 16 bytes: {:x?}",
+                self.offset, ino, rec_len, &entry_data[..16.min(entry_data.len())]
+            );
+        }
+
+        // If inode is 0, this is an unused entry, skip it
+        if ino == 0 {
+            // If rec_len is 0, we're at the end of the directory
+            if rec_len == 0 {
+                debug!("End of directory at offset {}", self.offset);
+                return None;
+            }
+            debug!("Skipping unused entry at offset {}", self.offset);
+            self.offset += rec_len as usize;
+            return self.next();
+        }
 
         if rec_len == 0 {
             return None;
@@ -144,6 +159,10 @@ impl<'a> Iterator for DirectoryIterator<'a> {
 
         // Check if we have enough data for the full entry
         if entry_data.len() < rec_len as usize {
+            warn!(
+                "Not enough data for directory entry: need {}, have {}",
+                rec_len, entry_data.len()
+            );
             return None;
         }
 
@@ -215,20 +234,51 @@ impl Directory {
         &self.entries
     }
 
-    /// Serialize the directory to bytes
+    /// Serialize directory to bytes
     pub fn to_bytes(&self) -> Ext4Result<Vec<u8>> {
         let mut data = Vec::new();
-
+        
+        if self.entries.is_empty() {
+            return Ok(data);
+        }
+        
+        // Calculate record lengths for all entries first
+        let mut entry_sizes = Vec::new();
         for entry in &self.entries {
-            let entry_data = self.entry_to_bytes(entry)?;
+            let name_len = entry.name.len();
+            // Minimum entry size is 8 bytes + name length, rounded up to 4-byte alignment
+            let entry_size = ((8 + name_len + 3) & !3) as u16;
+            entry_sizes.push(entry_size);
+        }
+        
+        // Now serialize entries with proper rec_len values
+        for (i, entry) in self.entries.iter().enumerate() {
+            let rec_len = if i < entry_sizes.len() - 1 {
+                // Not the last entry, rec_len is the size of this entry
+                entry_sizes[i]
+            } else {
+                // Last entry, rec_len should extend to fill the block
+                // Calculate how much space is left in the block
+                let total_size: u16 = entry_sizes.iter().sum();
+                let block_size = 4096u16; // ext4 block size
+                // If total size exceeds block size, just use the entry size
+                if total_size > block_size {
+                    entry_sizes[i]
+                } else {
+                    // Last entry fills the rest of the block
+                    block_size - (total_size - entry_sizes[i])
+                }
+            };
+            
+            let entry_data = self.entry_to_bytes_with_rec_len(entry, rec_len)?;
             data.extend_from_slice(&entry_data);
         }
 
         Ok(data)
     }
 
-    /// Convert an entry to bytes
-    fn entry_to_bytes(&self, entry: &DirectoryEntry) -> Ext4Result<Vec<u8>> {
+    /// Convert an entry to bytes with specified record length
+    fn entry_to_bytes_with_rec_len(&self, entry: &DirectoryEntry, rec_len: u16) -> Ext4Result<Vec<u8>> {
         let mut data = Vec::new();
 
         // Inode number (4 bytes)
@@ -237,9 +287,9 @@ impl Directory {
         data.push(((entry.ino >> 16) & 0xFF) as u8);
         data.push(((entry.ino >> 24) & 0xFF) as u8);
 
-        // Record length (2 bytes)
-        data.push((entry.rec_len & 0xFF) as u8);
-        data.push(((entry.rec_len >> 8) & 0xFF) as u8);
+        // Record length (2 bytes) - this is the total length of this entry
+        data.push((rec_len & 0xFF) as u8);
+        data.push(((rec_len >> 8) & 0xFF) as u8);
 
         // Name length (1 byte)
         data.push(entry.name_len);
@@ -250,11 +300,19 @@ impl Directory {
         // Name
         data.extend_from_slice(entry.name.as_bytes());
 
-        // Padding to align to 4-byte boundary
-        while data.len() % 4 != 0 {
+        // Padding to fill up to rec_len
+        while data.len() < rec_len as usize {
             data.push(0);
         }
 
         Ok(data)
+    }
+
+    /// Convert an entry to bytes (legacy method for compatibility)
+    fn entry_to_bytes(&self, entry: &DirectoryEntry) -> Ext4Result<Vec<u8>> {
+        // Calculate entry size
+        let name_len = entry.name.len();
+        let entry_size = ((8 + name_len + 3) & !3) as u16;
+        self.entry_to_bytes_with_rec_len(entry, entry_size)
     }
 }

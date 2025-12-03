@@ -14,6 +14,7 @@ use log::*;
 mod bitmap;
 mod block_group;
 mod directory;
+mod extent;
 mod file;
 mod inode;
 mod journal;
@@ -23,6 +24,7 @@ mod symlink;
 pub use bitmap::Bitmap;
 pub use block_group::BlockGroupDescriptor;
 pub use directory::{Directory, DirectoryEntry, DirectoryIterator};
+pub use extent::{parse_extent_node, find_block_in_extent_tree};
 pub use file::File;
 pub use inode::{Inode, InodeMode, InodeType};
 pub use superblock::SuperBlock;
@@ -246,6 +248,39 @@ impl<D: axdriver_block::BlockDriverOps> Ext4FileSystem<D> {
         Ok(descriptors)
     }
 
+    /// Write a block group descriptor to disk
+    fn write_block_group_descriptor(&mut self, group_index: usize) -> Ext4Result<()> {
+        let block_size = self.superblock.block_size();
+        let desc_size = if self.superblock.rev_level() >= 1 { 64 } else { 32 };
+        let blocks_per_desc = block_size / desc_size;
+        
+        // Calculate which block contains this descriptor
+        let desc_block_index = group_index / blocks_per_desc as usize;
+        let desc_offset_in_block = (group_index % blocks_per_desc as usize) * desc_size as usize;
+        
+        // In ext4, block group descriptors are typically at block 1 (or block 0 if first_data_block is 0)
+        let block = if self.superblock.first_data_block() == 0 {
+            1 + desc_block_index as u64
+        } else {
+            (self.superblock.first_data_block() as u64) + 1 + desc_block_index as u64
+        };
+        
+        // Read entire descriptor block
+        let mut buf = vec![0u8; block_size as usize];
+        self.read_block(block as u32, &mut buf)?;
+        
+        // Convert descriptor to bytes and update buffer
+        let desc_bytes = self.block_groups[group_index].to_bytes();
+        buf[desc_offset_in_block..desc_offset_in_block + desc_size as usize]
+            .copy_from_slice(&desc_bytes[..desc_size as usize]);
+        
+        // Write updated block back to disk
+        self.write_block(block as u32, &buf)?;
+        
+        debug!("Wrote block group descriptor {} at block {} offset {}", group_index, block, desc_offset_in_block);
+        Ok(())
+    }
+
     /// Get the root inode
     pub fn root_inode(&self) -> Ext4Result<Inode> {
         self.get_inode(EXT4_ROOT_INO)
@@ -369,21 +404,37 @@ impl<D: axdriver_block::BlockDriverOps> Ext4FileSystem<D> {
     }
 
     /// Allocate a new inode
-    pub fn alloc_inode(&self) -> Ext4Result<u32> {
+    pub fn alloc_inode(&mut self) -> Ext4Result<u32> {
         if self.mount_options.read_only {
             return Err(Ext4Error::ReadOnly);
         }
 
         // Simple inode allocation - find first free inode
-        for (i, bg) in self.block_groups.iter().enumerate() {
-            if bg.free_inodes_count() > 0 {
-                let inode_bitmap = bg.inode_bitmap();
+        let groups_count = self.block_groups.len();
+        for i in 0..groups_count {
+            // Check if this group has free inodes
+            if self.block_groups[i].free_inodes_count() > 0 {
+                let inode_bitmap = self.block_groups[i].inode_bitmap();
                 let mut buf = vec![0u8; self.superblock.block_size() as usize];
                 self.read_block(inode_bitmap, &mut buf)?;
 
-                let bitmap = Bitmap::from_bytes(&buf);
+                let mut bitmap = Bitmap::from_bytes(&buf);
                 if let Some(bit) = bitmap.find_first_free() {
                     let ino = i as u32 * self.superblock.inodes_per_group() + bit as u32 + 1;
+                    
+                    // Mark inode as used in bitmap
+                    bitmap.set(bit)?;
+                    buf.copy_from_slice(bitmap.as_bytes());
+                    self.write_block(inode_bitmap, &buf)?;
+                    
+                    // Update free inodes count in block group descriptor
+                    let new_free_count = self.block_groups[i].free_inodes_count() - 1;
+                    self.block_groups[i].set_free_inodes_count(new_free_count);
+                    
+                    // Write updated block group descriptor to disk
+                    self.write_block_group_descriptor(i)?;
+                    
+                    debug!("Allocated inode {} in block group {}, free inodes now: {}", ino, i, new_free_count);
                     return Ok(ino);
                 }
             }
@@ -487,20 +538,62 @@ impl<D: axdriver_block::BlockDriverOps> Ext4FileSystem<D> {
                 continue;
             }
 
+            // Check if block number is valid
+            if block_num >= self.superblock.blocks_count() as u32 {
+                warn!("Invalid block number {} for directory inode {}, skipping", block_num, ino);
+                continue;
+            }
+
             let mut block_buf = vec![0u8; block_size as usize];
-            self.read_block(block_num, &mut block_buf)?;
-            debug!(
-                "Read directory block {} ({} bytes), first 32 bytes: {:x?}",
-                block_num,
-                block_buf.len(),
-                &block_buf[..32.min(block_buf.len())]
-            );
-            dir_data.extend_from_slice(&block_buf);
+            match self.read_block(block_num, &mut block_buf) {
+                Ok(_) => {
+                    debug!(
+                        "Read directory block {} ({} bytes), first 32 bytes: {:x?}",
+                        block_num,
+                        block_buf.len(),
+                        &block_buf[..32.min(block_buf.len())]
+                    );
+                    dir_data.extend_from_slice(&block_buf);
+                }
+                Err(e) => {
+                    warn!("Failed to read directory block {} for inode {}: {:?}", block_num, ino, e);
+                    continue;
+                }
+            }
         }
 
         debug!("Parsing directory data ({} bytes)", dir_data.len());
-        let dir = Directory::from_bytes(&dir_data)?;
+        let mut dir = Directory::from_bytes(&dir_data)?;
         debug!("Found {} directory entries", dir.entries().len());
+        
+        // Add . and .. entries for root directory if they don't exist
+        if ino == EXT4_ROOT_INO {
+            let has_dot = dir.entries().iter().any(|e| e.name == ".");
+            let has_dotdot = dir.entries().iter().any(|e| e.name == "..");
+            
+            if !has_dot {
+                dir.add_entry(DirectoryEntry {
+                    ino: EXT4_ROOT_INO,
+                    rec_len: 12,
+                    name_len: 1,
+                    file_type: 2, // Directory
+                    name: String::from("."),
+                });
+                debug!("Added . entry to root directory");
+            }
+            
+            if !has_dotdot {
+                dir.add_entry(DirectoryEntry {
+                    ino: EXT4_ROOT_INO, // Root's parent is itself
+                    rec_len: 12,
+                    name_len: 2,
+                    file_type: 2, // Directory
+                    name: String::from(".."),
+                });
+                debug!("Added .. entry to root directory");
+            }
+        }
+        
         Ok(dir.entries().to_vec())
     }
 
@@ -525,6 +618,7 @@ impl<D: axdriver_block::BlockDriverOps> Ext4FileSystem<D> {
         let new_ino = self.alloc_inode()?;
         let mut new_inode = Inode::new(new_ino);
         new_inode.mode = mode | InodeMode::IFDIR; // Set as directory
+        new_inode.links_count = 2; // . and ..
 
         // Allocate block for directory
         let block_num = self.alloc_block()?;
@@ -565,6 +659,11 @@ impl<D: axdriver_block::BlockDriverOps> Ext4FileSystem<D> {
         // Add entry to parent directory
         self.add_dir_entry(parent, new_ino, name, InodeType::Directory)?;
 
+        // Update parent directory's links count
+        let mut parent_inode_updated = parent_inode;
+        parent_inode_updated.links_count += 1;
+        self.write_inode(&parent_inode_updated)?;
+
         Ok(new_ino)
     }
 
@@ -589,6 +688,7 @@ impl<D: axdriver_block::BlockDriverOps> Ext4FileSystem<D> {
         let new_ino = self.alloc_inode()?;
         let mut new_inode = Inode::new(new_ino);
         new_inode.mode = mode | InodeMode::IFREG; // Set as regular file
+        new_inode.links_count = 1; // One link from parent directory
 
         // Write inode (no blocks allocated initially for empty file)
         self.write_inode(&new_inode)?;
@@ -637,10 +737,14 @@ impl<D: axdriver_block::BlockDriverOps> Ext4FileSystem<D> {
             InodeType::SymLink => 7,
         };
 
+        // Calculate proper record length (aligned to 4 bytes)
+        let name_len = name.len();
+        let rec_len = ((8 + name_len + 3) & !3) as u16;
+
         dir.add_entry(DirectoryEntry {
             ino,
-            rec_len: 8 + name.len() as u16,
-            name_len: name.len() as u8,
+            rec_len,
+            name_len: name_len as u8,
             file_type: file_type_num,
             name: String::from(name),
         });

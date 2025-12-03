@@ -329,39 +329,90 @@ impl Inode {
     {
         let block_index = offset / block_size as u64;
 
-        if block_index < 12 {
-            // Direct block
-            Ok(self.block[block_index as usize])
-        } else if block_index < 12 + (block_size as u64 / 4) {
-            // Singly indirect block
-            let indirect_index = block_index - 12;
-            self.get_indirect_block(self.block[12], indirect_index as u32, block_size, fs)
-        } else if block_index
-            < 12 + (block_size as u64 / 4) + ((block_size as u64 / 4) * (block_size as u64 / 4))
-        {
-            // Doubly indirect block
-            let doubly_index = block_index - 12 - (block_size as u64 / 4);
-            let first_level = doubly_index / (block_size as u64 / 4);
-            let second_level = doubly_index % (block_size as u64 / 4);
-            let indirect_block =
-                self.get_indirect_block(self.block[13], first_level as u32, block_size, fs)?;
-            self.get_indirect_block(indirect_block, second_level as u32, block_size, fs)
+        // Check if filesystem uses extents
+        if fs.superblock.feature_incompat() & 0x0040 != 0 {
+            // EXT4_FEATURE_INCOMPAT_EXTENTS - use extent tree
+            crate::extent::find_block_in_extent_tree(fs, &self.block, block_index as u32)
         } else {
-            // Triply indirect block
-            let triply_index = block_index
-                - 12
-                - (block_size as u64 / 4)
-                - ((block_size as u64 / 4) * (block_size as u64 / 4));
-            let first_level = triply_index / ((block_size as u64 / 4) * (block_size as u64 / 4));
-            let remaining = triply_index % ((block_size as u64 / 4) * (block_size as u64 / 4));
-            let second_level = remaining / (block_size as u64 / 4);
-            let third_level = remaining % (block_size as u64 / 4);
+            // Traditional block mapping
+            if block_index < 12 {
+                // Direct block
+                let block_num = self.block[block_index as usize];
+                // Validate block number
+                if block_num == 0 || block_num >= fs.superblock().blocks_count() as u32 {
+                    return Ok(0);
+                }
+                Ok(block_num)
+            } else if block_index < 12 + (block_size as u64 / 4) {
+                // Singly indirect block
+                let indirect_index = block_index - 12;
+                if self.block[12] == 0 {
+                    return Ok(0);
+                }
+                let block_num = self.get_indirect_block(self.block[12], indirect_index as u32, block_size, fs)?;
+                // Validate block number
+                if block_num == 0 || block_num >= fs.superblock().blocks_count() as u32 {
+                    return Ok(0);
+                }
+                Ok(block_num)
+            } else if block_index
+                < 12 + (block_size as u64 / 4) + ((block_size as u64 / 4) * (block_size as u64 / 4))
+            {
+                // Doubly indirect block
+                let doubly_index = block_index - 12 - (block_size as u64 / 4);
+                let first_level = doubly_index / (block_size as u64 / 4);
+                let second_level = doubly_index % (block_size as u64 / 4);
+                
+                if self.block[13] == 0 {
+                    return Ok(0);
+                }
+                
+                let indirect_block =
+                    self.get_indirect_block(self.block[13], first_level as u32, block_size, fs)?;
+                if indirect_block == 0 {
+                    return Ok(0);
+                }
+                
+                let block_num = self.get_indirect_block(indirect_block, second_level as u32, block_size, fs)?;
+                // Validate block number
+                if block_num == 0 || block_num >= fs.superblock().blocks_count() as u32 {
+                    return Ok(0);
+                }
+                Ok(block_num)
+            } else {
+                // Triply indirect block
+                let triply_index = block_index
+                    - 12
+                    - (block_size as u64 / 4)
+                    - ((block_size as u64 / 4) * (block_size as u64 / 4));
+                let first_level = triply_index / ((block_size as u64 / 4) * (block_size as u64 / 4));
+                let remaining = triply_index % ((block_size as u64 / 4) * (block_size as u64 / 4));
+                let second_level = remaining / (block_size as u64 / 4);
+                let third_level = remaining % (block_size as u64 / 4);
 
-            let indirect_block =
-                self.get_indirect_block(self.block[14], first_level as u32, block_size, fs)?;
-            let doubly_indirect =
-                self.get_indirect_block(indirect_block, second_level as u32, block_size, fs)?;
-            self.get_indirect_block(doubly_indirect, third_level as u32, block_size, fs)
+                if self.block[14] == 0 {
+                    return Ok(0);
+                }
+
+                let indirect_block =
+                    self.get_indirect_block(self.block[14], first_level as u32, block_size, fs)?;
+                if indirect_block == 0 {
+                    return Ok(0);
+                }
+                
+                let doubly_indirect =
+                    self.get_indirect_block(indirect_block, second_level as u32, block_size, fs)?;
+                if doubly_indirect == 0 {
+                    return Ok(0);
+                }
+                
+                let block_num = self.get_indirect_block(doubly_indirect, third_level as u32, block_size, fs)?;
+                // Validate block number
+                if block_num == 0 || block_num >= fs.superblock().blocks_count() as u32 {
+                    return Ok(0);
+                }
+                Ok(block_num)
+            }
         }
     }
 
